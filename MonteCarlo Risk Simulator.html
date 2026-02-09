@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WSP Project Cost Risk Monte Carlo - WebApp V2</title>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <style>
+        body { font-family: system-ui, -apple-system, sans-serif; background: #f7f9fb; margin: 0; padding: 20px; }
+        .wrap { max-width: 1200px; margin: 0 auto; }
+        .card { background: white; border: 1px solid #e6e9ef; border-radius: 10px; padding: 20px; margin: 10px 0; }
+        .row { display: flex; flex-wrap: wrap; gap: 15px; }
+        .col { flex: 1 1 200px; }
+        label { display: block; font-size: 0.9rem; margin-bottom: 4px; color: #333; }
+        input, select, button { font-size: 1rem; padding: 8px; border: 1px solid #ccd3df; border-radius: 8px; width: 100%; }
+        button { cursor: pointer; background: #0f62fe; color: white; border: none; }
+        button.secondary { background: white; color: #0f62fe; border: 1px solid #0f62fe; }
+        .btnbar { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 15px; }
+        canvas { background: white; border: 1px solid #e6e9ef; border-radius: 10px; width: 100%; height: 300px; }
+        .kpi { font-size: 1.2rem; font-weight: 600; color: #1f7a1f; }
+        .upload-area { border: 2px dashed #0f62fe; padding: 30px; text-align: center; cursor: pointer; }
+        .upload-area.dragover { background: #e3f2fd; }
+        .results { display: none; }
+    </style>
+</head>
+<body>
+    <div class="wrap">
+        <h1>🛠️ WSP Monte Carlo Risk Analyzer</h1>
+        <p><em>Upload Excel → World-class @Risk analysis in seconds</em></p>
+        
+        <!-- Upload Section -->
+        <div class="card">
+            <div class="row">
+                <div class="col">
+                    <label>📁 Upload Excel File</label>
+                    <div id="uploadArea" class="upload-area">
+                        <div>Drop Excel or click to browse</div>
+                        <input type="file" id="excelFile" accept=".xlsx,.xls" style="display: none;">
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Controls (hidden until upload) -->
+        <div id="controls" class="results">
+            <div class="card">
+                <div class="row">
+                    <div class="col"><label>Currency</label><input id="currency" value="£" readonly></div>
+                    <div class="col"><label>Working Budget</label><input id="wb" type="number" readonly></div>
+                    <div class="col"><label>Contract Budget</label><input id="cb" type="number" readonly></div>
+                    <div class="col"><label>Iterations</label><input id="iterations" type="number" value="20000" min="1000"></div>
+                </div>
+                <div class="btnbar">
+                    <button onclick="runSimulation()">🚀 Run Analysis</button>
+                    <button class="secondary" onclick="downloadResults()">📥 Download Results</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Results -->
+        <div id="resultsSection" class="results">
+            <!-- KPIs -->
+            <div class="row">
+                <div class="col">
+                    <div class="card">
+                        <h3>Summary</h3>
+                        <div id="kpis">
+                            <div class="kpi">Loading...</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col">
+                    <div class="card">
+                        <h3>Overrun Risk</h3>
+                        <div id="overrunRisk" class="kpi">0%</div>
+                        <small>Pr(Total > Contract Budget)</small>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Charts -->
+            <div class="row">
+                <div class="col">
+                    <div class="card">
+                        <h3>Distribution</h3>
+                        <canvas id="histogram"></canvas>
+                    </div>
+                </div>
+                <div class="col">
+                    <div class="card">
+                        <h3>S-Curve</h3>
+                        <canvas id="scurve"></canvas>
+                    </div>
+                </div>
+            </div>
+            <div class="row">
+                <div class="col" style="flex: 2;">
+                    <div class="card">
+                        <h3>Tornado Sensitivity</h3>
+                        <canvas id="tornado"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Core Distributions (from your original)
+        function randNormal() {
+            let u = 0, v = 0;
+            while (u === 0) u = Math.random();
+            while (v === 0) v = Math.random();
+            return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+        }
+
+        function sampleTriangular(low, mode, high) {
+            const u = Math.random(), c = (mode - low) / (high - low);
+            if (u <= c) return low + Math.sqrt(u * (high - low) * (mode - low));
+            return high - Math.sqrt((1 - u) * (high - low) * (high - mode));
+        }
+
+        function samplePERT(low, mode, high, lam = 4) {
+            if (high === low) return low;
+            const a = 1 + lam * (mode - low) / (high - low);
+            const b = 1 + lam * (high - mode) / (high - low);
+            return low + (high - low) * randBeta(a, b);
+        }
+
+        function randBeta(a, b) {
+            const x = randGamma(a), y = randGamma(b);
+            return x / (x + y);
+        }
+
+        function randGamma(k) {
+            if (k < 1) {
+                const d = randGamma(k + 1), u = Math.random();
+                return d * Math.pow(u, 1 / k);
+            }
+            const dk = k - 1 / 3, c = 1 / Math.sqrt(9 * dk);
+            while (true) {
+                let x = randNormal(), v = 1 + c * x;
+                if (v > 0) {
+                    v *= v * v;
+                    const u = Math.random();
+                    if (u < 1 - 0.0331 * x * x || Math.log(u) < 0.5 * x * x + dk * (1 - v + Math.log(v))) {
+                        return dk * v;
+                    }
+                }
+            }
+        }
+
+        // Monte Carlo Engine
+        function runSimulation() {
+            const wb = parseFloat(document.getElementById('wb').value);
+            const cb = parseFloat(document.getElementById('cb').value);
+            const iterations = parseInt(document.getElementById('iterations').value);
+            const risks = window.risksData;
+
+            const totals = new Array(iterations).fill(wb);
+            const contributions = {};
+            risks.forEach(r => contributions[r.Name] = new Array(iterations).fill(0));
+
+            // Base variability
+            const baseSdPct = 0.025; // Default 2.5%
+            const sd = baseSdPct * wb;
+            for (let i = 0; i < iterations; i++) {
+                totals[i] += randNormal() * sd;
+            }
+
+            // Risk events
+            risks.forEach(r => {
+                const dist = r.Distribution.toUpperCase();
+                for (let i = 0; i < iterations; i++) {
+                    if (Math.random() < r.Probability) {
+                        const impact = dist === 'TRIANGULAR' ? 
+                            sampleTriangular(r.Low, r.Mode, r.High) : 
+                            samplePERT(r.Low, r.Mode, r.High);
+                        contributions[r.Name][i] = impact;
+                        totals[i] += impact;
+                    }
+                }
+            });
+
+            // Results
+            const sorted = totals.sort((a, b) => a - b);
+            const p50 = percentiles(sorted, 0.50)[0];
+            const p80 = percentiles(sorted, 0.80)[0];
+            const p90 = percentiles(sorted, 0.90)[0];
+            const probOver = totals.filter(t => t > cb).length / iterations * 100;
+
+            window.results = { totals: sorted, p50, p80, p90, probOver, contributions };
+            displayResults(wb, cb, p50, p80, p90, probOver);
+            drawCharts();
+        }
+
+        // Utilities
+        function percentiles(sorted, p) {
+            const n = sorted.length, idx = (n - 1) * p;
+            const i0 = Math.floor(idx), i1 = Math.ceil(idx);
+            if (i0 === i1) return [sorted[i0]];
+            const w = idx - i0;
+            return [sorted[i0] * (1 - w) + sorted[i1] * w];
+        }
+
+        function displayResults(wb, cb, p50, p80, p90, probOver) {
+            document.getElementById('kpis').innerHTML = `
+                <div>WB: £${wb.toLocaleString()}</div>
+                <div>CB: £${cb.toLocaleString()}</div>
+                <div>P50: £${p50.toLocaleString()}</div>
+                <div>P80: £${p80.toLocaleString()}</div>
+                <div>P90: £${p90.toLocaleString()}</div>
+            `;
+            document.getElementById('overrunRisk').textContent = `${probOver.toFixed(1)}%`;
+        }
+
+        function drawCharts() {
+            drawHistogram(document.getElementById('histogram'), window.results);
+            drawSCurve(document.getElementById('scurve'), window.results);
+            drawTornado(document.getElementById('tornado'), window.results);
+        }
+
+        function drawHistogram(canvas, results) {
+            const ctx = canvas.getContext('2d');
+            const W = canvas.width = 500, H = canvas.height = 300;
+            ctx.clearRect(0, 0, W, H);
+            
+            const totals = results.totals, cb = parseFloat(document.getElementById('cb').value);
+            const minV = Math.min(...totals), maxV = Math.max(...totals);
+            const bins = 40, width = (maxV - minV) / bins;
+            const counts = new Array(bins).fill(0);
+            
+            totals.forEach(v => {
+                const bi = Math.min(bins - 1, Math.floor((v - minV) / width));
+                counts[bi]++;
+            });
+
+            const maxCount = Math.max(...counts);
+            const barW = (W - 60) / bins;
+            ctx.fillStyle = '#36A2EB';
+            counts.forEach((count, i) => {
+                const h = (count / maxCount) * (H - 60);
+                ctx.fillRect(30 + i * barW, H - 30 - h, barW - 1, h);
+            });
+
+            // Contract Budget line
+            ctx.strokeStyle = '#ff4444';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([5, 5]);
+            ctx.beginPath();
+            ctx.moveTo(30 + ((cb - minV) / width) * barW, 20);
+            ctx.lineTo(30 + ((cb - minV) / width) * barW, H - 30);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        function drawSCurve(canvas, results) {
+            const ctx = canvas.getContext('2d');
+            const W = canvas.width = 500, H = canvas.height = 300;
+            ctx.clearRect(0, 0, W, H);
+            
+            const totals = results.totals.sort((a, b) => a - b);
+            ctx.strokeStyle = '#1f77b4';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            for (let i = 0; i < totals.length; i++) {
+                const x = 30 + (i / totals.length) * (W - 60);
+                const y = 30 + (1 - i / totals.length) * (H - 60);
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+        }
+
+        function drawTornado(canvas, results) {
+            const ctx = canvas.getContext('2d');
+            const W = canvas.width = 1000, H = canvas.height = 300;
+            ctx.clearRect(0, 0, W, H);
+            
+            const contributions = results.contributions;
+            const sens = Object.entries(contributions).map(([name, contrib]) => {
+                const ranks = Array.from({length: results.totals.length}, (_, i) => i)
+                    .sort((a, b) => results.totals[a] - results.totals[b]);
+                const corr = pearsonR(ranks, contrib.map((_, i) => ranks.indexOf(i)));
+                return [name, Math.abs(corr)];
+            }).sort((a, b) => b[1] - a[1]).slice(0, 10);
+
+            const rowH = 25, pad = 40;
+            sens.forEach(([name, corr], i) => {
+                const y = pad + i * rowH;
+                const x0 = W / 2, len = Math.min(Math.abs(corr) * 200, 200);
+                ctx.fillStyle = corr > 0 ? '#e377c2' : '#ff7f0e';
+                ctx.fillRect(x0 - len/2, y, len, rowH - 6);
+                ctx.fillStyle = '#333';
+                ctx.font = '14px system-ui';
+                ctx.fillText(name, 10, y + rowH - 8);
+                ctx.fillText(corr.toFixed(3), W - 80, y + rowH - 8);
+            });
+        }
+
+        function pearsonR(x, y) {
+            const n = x.length;
+            const mx = x.reduce((a, b) => a + b) / n;
+            const my = y.reduce((a, b) => a + b) / n;
+            let num = 0, dx = 0, dy = 0;
+            for (let i = 0; i < n; i++) {
+                num += (x[i] - mx) * (y[i] - my);
+                dx += (x[i] - mx) ** 2;
+                dy += (y[i] - my) ** 2;
+            }
+            return num / Math.sqrt(dx * dy);
+        }
+
+        // Excel Upload
+        document.getElementById('uploadArea').addEventListener('click', () => {
+            document.getElementById('excelFile').click();
+        });
+
+        document.getElementById('excelFile').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            const data = await file.arrayBuffer();
+            const workbook = XLSX.read(data, { type: 'array' });
+            
+            // Read Settings
+            const settingsSheet = workbook.Sheets['Settings'];
+            const settings = XLSX.utils.sheet_to_json(settingsSheet);
+            document.getElementById('wb').value = settings.find(s => s.Parameter === 'Working Budget (GBP)')?.Value || 22000000;
+            document.getElementById('cb').value = settings.find(s => s.Parameter === 'Contract Budget (GBP)')?.Value || 25000000;
+            
+            // Read Risks
+            const risksSheet = workbook.Sheets['Risks'];
+            window.risksData = XLSX.utils.sheet_to_json(risksSheet);
+            
+            document.getElementById('controls').style.display = 'block';
+            document.getElementById('resultsSection').style.display = 'block';
+        });
+
+        // Drag & Drop
+        const uploadArea = document.getElementById('uploadArea');
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(event => {
+            uploadArea.addEventListener(event, e => {
+                e.preventDefault();
+                e.stopPropagation();
+            });
+        });
+
+        uploadArea.addEventListener('dragover', () => uploadArea.classList.add('dragover'));
+        uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('dragover'));
+        uploadArea.addEventListener('drop', e => {
+            document.getElementById('excelFile').files = e.dataTransfer.files;
+            document.getElementById('excelFile').dispatchEvent(new Event('change'));
+            uploadArea.classList.remove('dragover');
+        });
+
+        function downloadResults() {
+            if (!window.results) return;
+            const data = [
+                ['Total_Cost', ...Object.keys(window.results.contributions)],
+                ...window.results.totals.map((total, i) => {
+                    const row = [total];
+                    Object.values(window.results.contributions).forEach(contrib => row.push(contrib[i]));
+                    return row;
+                })
+            ];
+            const csv = data.map(row => row.join(',')).join('\n');
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'monte_carlo_results.csv';
+            a.click();
+        }
+    </script>
+</body>
+</html>
